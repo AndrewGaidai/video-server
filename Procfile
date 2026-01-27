@@ -1,1 +1,0 @@
-web: /app/.venv/bin/python video_server.py
