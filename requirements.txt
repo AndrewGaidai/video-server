@@ -1,7 +1,8 @@
 flask>=3.0.0
-moviepy>=1.0.3
+moviepy==1.0.3
 Pillow>=10.0.0
 requests>=2.31.0
-numpy>=1.24.0
+numpy<2.0.0
 imageio>=2.31.0
 imageio-ffmpeg>=0.4.9
+decorator<5.0.0
