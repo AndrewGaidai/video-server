@@ -107,7 +107,8 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     video = concatenate_videoclips(clips, method="compose")
     
     # CAPTION STYLING - MATCHES CAPCUT SYSTEM FONT STYLE
-    if caption:
+    # CAPTION STYLING - TEMPORARILY DISABLED FOR TESTING
+    if False:  # TODO: Change back to 'if caption:' after fonts are fixed
         print("Adding caption...")
         try:
             # Dynamic font size based on caption length

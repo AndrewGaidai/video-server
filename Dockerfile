@@ -1,23 +1,25 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# Install ffmpeg and other dependencies
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    imagemagick \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Fix ImageMagick security policy
+RUN sed -i 's/<policy domain="path" rights="none" pattern="@\*"/<policy domain="path" rights="read|write" pattern="@\*"/' /etc/ImageMagick-6/policy.xml
+
+# Copy application files
+WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
-COPY . .
+COPY video_server.py .
 
-# Expose port
+# Create necessary directories
+RUN mkdir -p temp_images output_videos
+
 EXPOSE 8080
 
-# Run the application
 CMD ["python", "video_server.py"]
-
-RUN apt-get update && apt-get install -y imagemagick
