@@ -19,3 +19,5 @@ EXPOSE 8080
 
 # Run the application
 CMD ["python", "video_server.py"]
+
+RUN apt-get update && apt-get install -y imagemagick
