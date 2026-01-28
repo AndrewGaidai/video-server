@@ -54,8 +54,7 @@ def create_video():
         )
         
         video_filename = os.path.basename(video_path)
-        # Update with your actual server URL after deployment
-        video_url = f"https://your-server.railway.app/videos/{video_filename}"
+        video_url = f"https://video-server-qcs9.onrender.com/videos/{video_filename}"
         
         return jsonify({
             "success": True,
@@ -107,9 +106,8 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     video = concatenate_videoclips(clips, method="compose")
     
     # CAPTION STYLING - MATCHES CAPCUT SYSTEM FONT STYLE
-    # CAPTION STYLING - TEMPORARILY DISABLED FOR TESTING
-    if False:  # TODO: Change back to 'if caption:' after fonts are fixed
-        print("Adding caption...")
+    if caption:
+        print(f"Adding caption: '{caption}'")
         try:
             # Dynamic font size based on caption length
             caption_length = len(caption)
@@ -123,26 +121,13 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
                 fontsize = 65
                 stroke_width = 3
             
-            # Try system fonts in order of availability
-            # Segoe UI (Windows), SF Pro (Mac), Helvetica Neue, Arial (fallback)
-            fonts_to_try = ['Segoe-UI', 'SF-Pro-Display', 'Helvetica-Neue', 'Arial']
-            selected_font = 'Arial'  # fallback
-            
-            for font in fonts_to_try:
-                try:
-                    # Test if font works
-                    test = TextClip("test", font=font, fontsize=20)
-                    selected_font = font
-                    test.close()
-                    break
-                except:
-                    continue
+            print(f"Font size: {fontsize}, stroke: {stroke_width}")
             
             txt_clip = TextClip(
                 caption,
                 fontsize=fontsize,
                 color='white',
-                font=selected_font,
+                font='Arial',  # Simplified - just use Arial
                 stroke_color='black',
                 stroke_width=stroke_width,
                 method='caption',
@@ -150,13 +135,20 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
                 align='center'
             )
             
+            print("TextClip created successfully")
+            
             # Position at 30% from bottom = 70% from top
             # 1920 * 0.70 = 1344px from top
             txt_clip = txt_clip.set_position(('center', 1344)).set_duration(video.duration)
+            print(f"TextClip positioned at 1344px, duration: {video.duration}s")
             
             video = CompositeVideoClip([video, txt_clip])
+            print("Caption composited into video")
+            
         except Exception as e:
-            print(f"Error adding caption: {e}")
+            print(f"!!! CAPTION ERROR: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
     
     # Add music
     if music_url:
