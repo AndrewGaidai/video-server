@@ -1,3 +1,13 @@
+"""
+Video Server for Instagram Reels/TikTok Slideshow Generation
+
+Instagram Reels UI Safe Zones (1080x1920):
+- Top 300px: Username, audio, camera button - AVOID
+- Bottom 350px: Like, comment, share buttons - AVOID
+- Safe zone for captions: 1200-1600px from top
+- Our caption position: 1344px (70% from top = 30% from bottom)
+"""
+
 from flask import Flask, request, jsonify, send_file
 from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip, TextClip
 from PIL import Image
@@ -10,7 +20,6 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Create folders for temp files
 os.makedirs('temp_images', exist_ok=True)
 os.makedirs('output_videos', exist_ok=True)
 
@@ -21,29 +30,22 @@ def health():
 @app.route('/create-video', methods=['POST'])
 def create_video():
     try:
-        # Get data from Buildship
         data = request.json
         
-        image_urls = data.get('image_urls', [])  # List of image URLs
-        music_url = data.get('music_url', '')     # Music URL
-        beat_timings = data.get('beat_timings', [])  # List of durations [1.2, 0.8, 1.5, ...]
-        caption = data.get('caption', '')         # Caption text
+        image_urls = data.get('image_urls', [])
+        music_url = data.get('music_url', '')
+        beat_timings = data.get('beat_timings', [])
+        caption = data.get('caption', '')
         
-        # Validate inputs
         if not image_urls or not beat_timings:
             return jsonify({"error": "Missing image_urls or beat_timings"}), 400
         
-        # Make sure we have same number of images and timings
-        if len(image_urls) != len(beat_timings):
-            # If more images than timings, trim images
-            # If more timings than images, trim timings
-            min_length = min(len(image_urls), len(beat_timings))
-            image_urls = image_urls[:min_length]
-            beat_timings = beat_timings[:min_length]
+        min_length = min(len(image_urls), len(beat_timings))
+        image_urls = image_urls[:min_length]
+        beat_timings = beat_timings[:min_length]
         
         print(f"Creating video with {len(image_urls)} images...")
         
-        # Create video
         video_path = create_slideshow_video(
             image_urls=image_urls,
             music_url=music_url,
@@ -51,8 +53,8 @@ def create_video():
             caption=caption
         )
         
-        # Return the video file URL (you'll need to serve this)
         video_filename = os.path.basename(video_path)
+        # Update with your actual server URL after deployment
         video_url = f"https://your-server.railway.app/videos/{video_filename}"
         
         return jsonify({
@@ -66,40 +68,31 @@ def create_video():
         return jsonify({"error": str(e)}), 500
 
 def create_slideshow_video(image_urls, music_url, beat_timings, caption):
-    """
-    Create a slideshow video from images with music and caption
-    """
     clips = []
     video_id = str(uuid.uuid4())[:8]
     
-    # Download and create clips for each image
+    # Process images
     for idx, (img_url, duration) in enumerate(zip(image_urls, beat_timings)):
         try:
             print(f"Processing image {idx + 1}/{len(image_urls)}...")
             
-            # Download image
             response = requests.get(img_url, timeout=10)
             response.raise_for_status()
             
-            # Open image
             img = Image.open(BytesIO(response.content))
             
-            # Convert to RGB if necessary
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize to 1080x1920 (9:16 aspect ratio for reels/shorts)
-            # You can change this to 1920x1080 for landscape
+            # 9:16 for Instagram Reels/TikTok
             target_width = 1080
             target_height = 1920
             
             img = resize_and_crop(img, target_width, target_height)
             
-            # Save temp image
             temp_img_path = f'temp_images/{video_id}_img_{idx}.jpg'
             img.save(temp_img_path)
             
-            # Create clip
             clip = ImageClip(temp_img_path).set_duration(duration)
             clips.append(clip)
             
@@ -110,34 +103,64 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     if not clips:
         raise Exception("No valid images could be processed")
     
-    # Concatenate all clips
     print("Concatenating clips...")
     video = concatenate_videoclips(clips, method="compose")
     
-    # Add caption if provided
+    # CAPTION STYLING - MATCHES CAPCUT SYSTEM FONT STYLE
     if caption:
         print("Adding caption...")
         try:
+            # Dynamic font size based on caption length
+            caption_length = len(caption)
+            if caption_length < 30:
+                fontsize = 85
+                stroke_width = 4
+            elif caption_length < 50:
+                fontsize = 75
+                stroke_width = 3
+            else:
+                fontsize = 65
+                stroke_width = 3
+            
+            # Try system fonts in order of availability
+            # Segoe UI (Windows), SF Pro (Mac), Helvetica Neue, Arial (fallback)
+            fonts_to_try = ['Segoe-UI', 'SF-Pro-Display', 'Helvetica-Neue', 'Arial']
+            selected_font = 'Arial'  # fallback
+            
+            for font in fonts_to_try:
+                try:
+                    # Test if font works
+                    test = TextClip("test", font=font, fontsize=20)
+                    selected_font = font
+                    test.close()
+                    break
+                except:
+                    continue
+            
             txt_clip = TextClip(
                 caption,
-                fontsize=60,
+                fontsize=fontsize,
                 color='white',
-                font='Arial-Bold',
+                font=selected_font,
                 stroke_color='black',
-                stroke_width=2,
+                stroke_width=stroke_width,
                 method='caption',
-                size=(1000, None)  # Width, height auto
+                size=(950, None),      # Max width with side margins
+                align='center'
             )
-            txt_clip = txt_clip.set_position(('center', 100)).set_duration(video.duration)
+            
+            # Position at 30% from bottom = 70% from top
+            # 1920 * 0.70 = 1344px from top
+            txt_clip = txt_clip.set_position(('center', 1344)).set_duration(video.duration)
+            
             video = CompositeVideoClip([video, txt_clip])
         except Exception as e:
             print(f"Error adding caption: {e}")
     
-    # Add music if provided
+    # Add music
     if music_url:
         print("Adding music...")
         try:
-            # Download music
             music_response = requests.get(music_url, timeout=30)
             music_response.raise_for_status()
             
@@ -145,12 +168,9 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
             with open(temp_music_path, 'wb') as f:
                 f.write(music_response.content)
             
-            # Add audio
             audio = AudioFileClip(temp_music_path)
             
-            # Trim audio to video length or loop if too short
             if audio.duration < video.duration:
-                # Loop audio
                 num_loops = int(video.duration / audio.duration) + 1
                 audio = concatenate_audioclips([audio] * num_loops)
             
@@ -160,7 +180,7 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
         except Exception as e:
             print(f"Error adding music: {e}")
     
-    # Write final video
+    # Render
     print("Rendering video...")
     output_path = f'output_videos/video_{video_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.mp4'
     
@@ -169,11 +189,11 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
         fps=24,
         codec='libx264',
         audio_codec='aac',
-        preset='medium',  # Use 'ultrafast' for faster render, 'slow' for better quality
+        preset='medium',
         threads=4
     )
     
-    # Cleanup temp files
+    # Cleanup
     print("Cleaning up...")
     for idx in range(len(image_urls)):
         temp_img = f'temp_images/{video_id}_img_{idx}.jpg'
@@ -191,25 +211,20 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     return output_path
 
 def resize_and_crop(img, target_width, target_height):
-    """
-    Resize image to fill target dimensions and crop excess
-    """
+    """Resize and crop image to exact dimensions"""
     img_width, img_height = img.size
     target_ratio = target_width / target_height
     img_ratio = img_width / img_height
     
     if img_ratio > target_ratio:
-        # Image is wider, fit height and crop width
         new_height = target_height
         new_width = int(target_height * img_ratio)
     else:
-        # Image is taller, fit width and crop height
         new_width = target_width
         new_height = int(target_width / img_ratio)
     
     img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
     
-    # Crop to exact dimensions
     left = (new_width - target_width) // 2
     top = (new_height - target_height) // 2
     right = left + target_width
@@ -219,7 +234,6 @@ def resize_and_crop(img, target_width, target_height):
     
     return img
 
-# Endpoint to serve videos
 @app.route('/videos/<filename>', methods=['GET'])
 def serve_video(filename):
     video_path = os.path.join('output_videos', filename)
