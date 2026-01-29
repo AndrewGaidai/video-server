@@ -74,11 +74,15 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     for idx, (img_url, duration) in enumerate(zip(image_urls, beat_timings)):
         try:
             print(f"Processing image {idx + 1}/{len(image_urls)}...")
+            print(f"Downloading from: {img_url[:100]}...")  # Print URL (truncated)
             
             response = requests.get(img_url, timeout=10)
+            print(f"Download status: {response.status_code}")
             response.raise_for_status()
             
+            print(f"Opening image, size: {len(response.content)} bytes")
             img = Image.open(BytesIO(response.content))
+            print(f"Image mode: {img.mode}, size: {img.size}")
             
             if img.mode != 'RGB':
                 img = img.convert('RGB')
@@ -87,16 +91,21 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
             target_width = 1080
             target_height = 1920
             
+            print(f"Resizing to {target_width}x{target_height}...")
             img = resize_and_crop(img, target_width, target_height)
             
             temp_img_path = f'temp_images/{video_id}_img_{idx}.jpg'
             img.save(temp_img_path)
+            print(f"Saved to {temp_img_path}")
             
             clip = ImageClip(temp_img_path).set_duration(duration)
             clips.append(clip)
+            print(f"Clip created successfully")
             
         except Exception as e:
-            print(f"Error processing image {idx}: {e}")
+            print(f"!!! ERROR processing image {idx}: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             continue
     
     if not clips:
