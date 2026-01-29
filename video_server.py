@@ -114,24 +114,23 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     print("Concatenating clips...")
     video = concatenate_videoclips(clips, method="compose")
     
-    # CAPTION STYLING WITH EMOJI SUPPORT
+    # CAPTION STYLING - MONTSERRAT BOLD
     if caption:
         print(f"Adding caption: '{caption}'")
         try:
             from PIL import ImageDraw, ImageFont
-            import textwrap
             
             # Dynamic font size based on caption length
             caption_length = len(caption)
             if caption_length < 30:
                 fontsize = 80
-                stroke_width = 3
+                stroke_width = 2.5
             elif caption_length < 50:
                 fontsize = 70
-                stroke_width = 2
+                stroke_width = 2.0
             else:
                 fontsize = 60
-                stroke_width = 2
+                stroke_width = 1.8
             
             print(f"Font size: {fontsize}, stroke: {stroke_width}")
             
@@ -139,16 +138,73 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
             text_img = Image.new('RGBA', (1080, 600), (0, 0, 0, 0))
             draw = ImageDraw.Draw(text_img)
             
-            # Try to load system font with emoji support
+            # Use Montserrat Bold
             try:
-                # Linux: DejaVu Sans or fallback to default
-                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', fontsize)
+                font = ImageFont.truetype('/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf', fontsize)
             except:
-                try:
-                    # Try a different path or use default
-                    font = ImageFont.truetype('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', fontsize)
-                except:
-                    font = ImageFont.load_default()
+                # Fallback to DejaVu
+                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', fontsize)
+            
+            # Wrap text to fit width (~800px)
+            max_width = 800
+            lines = []
+            words = caption.split()
+            current_line = []
+            
+            for word in words:
+                test_line = ' '.join(current_line + [word])
+                bbox = draw.textbbox((0, 0), test_line, font=font)
+                if bbox[2] - bbox[0] <= max_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    current_line = [word]
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            # Calculate total height
+            line_height = fontsize + 10
+            total_height = len(lines) * line_height
+            
+            # Draw text with stroke (outline)
+            y_offset = (600 - total_height) // 2
+            for line in lines:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                text_width = bbox[2] - bbox[0]
+                x = (1080 - text_width) // 2
+                
+                # Draw stroke (black outline)
+                for adj_x in range(-int(stroke_width), int(stroke_width)+1):
+                    for adj_y in range(-int(stroke_width), int(stroke_width)+1):
+                        if adj_x != 0 or adj_y != 0:
+                            draw.text((x + adj_x, y_offset + adj_y), line, font=font, fill='black')
+                
+                # Draw main text (white)
+                draw.text((x, y_offset), line, font=font, fill='white')
+                y_offset += line_height
+            
+            # Save temporary image
+            temp_text_path = f'temp_images/{video_id}_text.png'
+            text_img.save(temp_text_path)
+            
+            # Create MoviePy clip from image
+            txt_clip = ImageClip(temp_text_path, transparent=True)
+            txt_clip = txt_clip.set_position(('center', 1200)).set_duration(video.duration)
+            
+            print("Text clip created successfully")
+            
+            video = CompositeVideoClip([video, txt_clip])
+            print("Caption composited into video")
+            
+            # Cleanup temp text image
+            if os.path.exists(temp_text_path):
+                os.remove(temp_text_path)
+            
+        except Exception as e:
+            print(f"!!! CAPTION ERROR: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             
             # Wrap text to fit width (~800px)
             max_width = 800
