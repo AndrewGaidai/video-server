@@ -118,7 +118,7 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     if caption:
         print(f"Adding caption: '{caption}'")
         try:
-            from PIL import Image, ImageDraw, ImageFont
+            from PIL import ImageDraw, ImageFont
             import textwrap
             
             # Dynamic font size based on caption length
