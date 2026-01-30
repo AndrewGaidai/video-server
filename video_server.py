@@ -16,11 +16,16 @@ from io import BytesIO
 import os
 import uuid
 from datetime import datetime
+import threading
+import gc
 
 app = Flask(__name__)
 
 os.makedirs('temp_images', exist_ok=True)
 os.makedirs('output_videos', exist_ok=True)
+
+# Lock to prevent parallel video rendering (memory protection)
+rendering_lock = threading.Lock()
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -28,6 +33,14 @@ def health():
 
 @app.route('/create-video', methods=['POST'])
 def create_video():
+    # Check if server is already rendering a video
+    if not rendering_lock.acquire(blocking=False):
+        print("Server busy - rejecting request")
+        return jsonify({
+            "error": "Server is busy rendering another video. Please try again in 60 seconds.",
+            "retry_after": 60
+        }), 429
+    
     try:
         data = request.json
         
@@ -64,6 +77,11 @@ def create_video():
     except Exception as e:
         print(f"Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+    
+    finally:
+        # Always release the lock
+        rendering_lock.release()
+        print("Lock released - server ready for next video")
 
 def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     clips = []
@@ -72,6 +90,7 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     # Download music FIRST to get full duration
     full_music_duration = sum(beat_timings)  # Default if no music
     temp_music_path = None
+    audio = None
     
     if music_url:
         try:
@@ -121,6 +140,12 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
             
             clip = ImageClip(temp_img_path).set_duration(duration)
             clips.append(clip)
+            
+            # FREE MEMORY IMMEDIATELY
+            img.close()
+            del img
+            del response
+            gc.collect()
             
         except Exception as e:
             print(f"ERROR processing image {idx}: {e}")
@@ -247,6 +272,11 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
     
     # Cleanup
     print("Cleaning up...")
+    
+    # Close all clips to free memory
+    for clip in clips:
+        clip.close()
+    
     for idx in range(len(image_urls)):
         temp_img = f'temp_images/{video_id}_img_{idx}.jpg'
         if os.path.exists(temp_img):
@@ -256,8 +286,11 @@ def create_slideshow_video(image_urls, music_url, beat_timings, caption):
         os.remove(temp_music_path)
     
     video.close()
-    if music_url:
+    if music_url and audio:
         audio.close()
+    
+    # Force garbage collection
+    gc.collect()
     
     print(f"Video created: {output_path}")
     return output_path
