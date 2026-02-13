@@ -1,24 +1,19 @@
 FROM python:3.11-slim
 
-# Install system dependencies + Montserrat font
-RUN apt-get update && apt-get install -y \
+# MoviePy needs ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    imagemagick \
-    fonts-liberation \
-    fonts-montserrat \
-    && rm -rf /var/lib/apt/lists/*
-
-# Fix ImageMagick security policy
-RUN find /etc -name "policy.xml" -exec sed -i 's/<policy domain="path" rights="none" pattern="@\*"/<policy domain="path" rights="read|write" pattern="@\*"/' {} \; || true
+    fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY video_server.py .
+COPY . /app
 
-RUN mkdir -p temp_images output_videos
+# Flask/Gunicorn port
+ENV PORT=8080
 
-EXPOSE 8080
-
-CMD ["python", "video_server.py"]
+# Start with gunicorn (production-safe)
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:8080", "video_server:app", "--timeout", "300"]

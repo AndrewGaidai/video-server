@@ -1,330 +1,386 @@
-"""
-Video Server for Instagram Reels/TikTok Slideshow Generation
-
-Instagram Reels UI Safe Zones (1080x1920):
-- Top 300px: Username, audio, camera button - AVOID
-- Bottom 350px: Like, comment, share buttons - AVOID
-- Safe zone for captions: 1200-1600px from top
-- Our caption position: 1200px
-"""
-
 from flask import Flask, request, jsonify, send_file
+from moviepy.audio.fx import all as afx
 from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import requests
 from io import BytesIO
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import gc
+import json
+import tempfile
+import numpy as np
+import time
 
 app = Flask(__name__)
-
-os.makedirs('temp_images', exist_ok=True)
-os.makedirs('output_videos', exist_ok=True)
-
-# Lock to prevent parallel video rendering (memory protection)
 rendering_lock = threading.Lock()
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok", "message": "Video server is running"})
+# Required: for track lookup only
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
+FACTORY_MUSIC_TABLE = "factory_music"
 
-@app.route('/create-video', methods=['POST'])
-def create_video():
-    # Check if server is already rendering a video
-    if not rendering_lock.acquire(blocking=False):
-        print("Server busy - rejecting request")
-        return jsonify({
-            "error": "Server is busy rendering another video. Please try again in 60 seconds.",
-            "retry_after": 60
-        }), 429
-    
-    try:
-        data = request.json
-        
-        image_urls = data.get('image_urls', [])
-        music_url = data.get('music_url', '')
-        beat_timings = data.get('beat_timings', [])
-        caption = data.get('caption', '')
-        
-        if not image_urls or not beat_timings:
-            return jsonify({"error": "Missing image_urls or beat_timings"}), 400
-        
-        min_length = min(len(image_urls), len(beat_timings))
-        image_urls = image_urls[:min_length]
-        beat_timings = beat_timings[:min_length]
-        
-        print(f"Creating video with {len(image_urls)} images...")
-        
-        video_path = create_slideshow_video(
-            image_urls=image_urls,
-            music_url=music_url,
-            beat_timings=beat_timings,
-            caption=caption
-        )
-        
-        video_filename = os.path.basename(video_path)
-        video_url = f"https://video-server-qcs9.onrender.com/videos/{video_filename}"
-        
-        return jsonify({
-            "success": True,
-            "video_url": video_url,
-            "message": f"Video created successfully with {len(image_urls)} images"
-        })
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-    
-    finally:
-        # Always release the lock
-        rendering_lock.release()
-        print("Lock released - server ready for next video")
+# Public base url of this server (Coolify domain or http://<ip>:8080)
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 
-def create_slideshow_video(image_urls, music_url, beat_timings, caption):
-    clips = []
-    video_id = str(uuid.uuid4())[:8]
-    
-    # Download music FIRST to get full duration
-    full_music_duration = sum(beat_timings)  # Default if no music
-    temp_music_path = None
-    audio = None
-    
-    if music_url:
-        try:
-            print("Downloading music to check duration...")
-            music_response = requests.get(music_url, timeout=30)
-            music_response.raise_for_status()
-            
-            temp_music_path = f'temp_images/{video_id}_music.mp3'
-            with open(temp_music_path, 'wb') as f:
-                f.write(music_response.content)
-            
-            audio = AudioFileClip(temp_music_path)
-            full_music_duration = audio.duration
-            audio.close()
-            print(f"Music duration: {full_music_duration}s")
-        except Exception as e:
-            print(f"Error downloading music: {e}")
-    
-    # Process images
-    for idx, (img_url, duration) in enumerate(zip(image_urls, beat_timings)):
-        try:
-            print(f"Processing image {idx + 1}/{len(image_urls)}...")
-            
-            response = requests.get(img_url, timeout=10)
-            response.raise_for_status()
-            
-            img = Image.open(BytesIO(response.content))
-            
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # 9:16 for Instagram Reels/TikTok
-            target_width = 1080
-            target_height = 1920
-            
-            img = resize_and_crop(img, target_width, target_height)
-            
-            temp_img_path = f'temp_images/{video_id}_img_{idx}.jpg'
-            img.save(temp_img_path)
-            
-            # EXTEND LAST IMAGE to fill remaining music time
-            if idx == len(image_urls) - 1:
-                elapsed = sum(beat_timings[:-1])
-                remaining = full_music_duration - elapsed
-                duration = max(duration, remaining)
-                print(f"Last image extended to {duration:.2f}s to match music")
-            
-            clip = ImageClip(temp_img_path).set_duration(duration)
-            clips.append(clip)
-            
-            # FREE MEMORY IMMEDIATELY
-            img.close()
-            del img
-            del response
-            gc.collect()
-            
-        except Exception as e:
-            print(f"ERROR processing image {idx}: {e}")
-            continue
-    
-    if not clips:
-        raise Exception("No valid images could be processed")
-    
-    print("Concatenating clips...")
-    video = concatenate_videoclips(clips, method="compose")
-    
-    # CAPTION STYLING - MONTSERRAT BOLD
-    if caption:
-        print(f"Adding caption: '{caption}'")
-        try:
-            from PIL import ImageDraw, ImageFont
-            
-            # Dynamic font size based on caption length
-            caption_length = len(caption)
-            if caption_length < 30:
-                fontsize = 80
-                stroke_width = 2.5
-            elif caption_length < 50:
-                fontsize = 70
-                stroke_width = 2.0
-            else:
-                fontsize = 60
-                stroke_width = 1.8
-            
-            print(f"Font size: {fontsize}, stroke: {stroke_width}")
-            
-            # Create transparent image for text
-            text_img = Image.new('RGBA', (1080, 600), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(text_img)
-            
-            # Use Montserrat Bold
+# How long to keep mp4 around for Buildship to fetch
+VIDEO_TTL_SECONDS = int(os.getenv("VIDEO_TTL_SECONDS", "600"))  # 10 min
+
+# In-memory registry: token -> {path, expires_at}
+VIDEO_CACHE = {}
+CACHE_LOCK = threading.Lock()
+
+
+def supabase_headers(json_content=False):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return None
+    hdrs = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    if json_content:
+        hdrs["Content-Type"] = "application/json"
+    return hdrs
+
+
+def to_float_list(x):
+    if x is None:
+        return []
+    if isinstance(x, list):
+        out = []
+        for v in x:
             try:
-                font = ImageFont.truetype('/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf', fontsize)
-            except:
-                # Fallback to DejaVu
-                font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', fontsize)
-            
-            # Wrap text to fit width (~800px)
-            max_width = 800
-            lines = []
-            words = caption.split()
-            current_line = []
-            
-            for word in words:
-                test_line = ' '.join(current_line + [word])
-                bbox = draw.textbbox((0, 0), test_line, font=font)
-                if bbox[2] - bbox[0] <= max_width:
-                    current_line.append(word)
-                else:
-                    if current_line:
-                        lines.append(' '.join(current_line))
-                    current_line = [word]
-            if current_line:
-                lines.append(' '.join(current_line))
-            
-            # Calculate total height
-            line_height = fontsize + 10
-            total_height = len(lines) * line_height
-            
-            # Draw text with stroke (outline)
-            y_offset = (600 - total_height) // 2
-            for line in lines:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                text_width = bbox[2] - bbox[0]
-                x = (1080 - text_width) // 2
-                
-                # Draw stroke (black outline)
-                for adj_x in range(-int(stroke_width), int(stroke_width)+1):
-                    for adj_y in range(-int(stroke_width), int(stroke_width)+1):
-                        if adj_x != 0 or adj_y != 0:
-                            draw.text((x + adj_x, y_offset + adj_y), line, font=font, fill='black')
-                
-                # Draw main text (white)
-                draw.text((x, y_offset), line, font=font, fill='white')
-                y_offset += line_height
-            
-            # Save temporary image
-            temp_text_path = f'temp_images/{video_id}_text.png'
-            text_img.save(temp_text_path)
-            
-            # Create MoviePy clip from image
-            txt_clip = ImageClip(temp_text_path, transparent=True)
-            txt_clip = txt_clip.set_position(('center', 1200)).set_duration(video.duration)
-            
-            print("Text clip created successfully")
-            
-            video = CompositeVideoClip([video, txt_clip])
-            print("Caption composited into video")
-            
-            # Cleanup temp text image
-            if os.path.exists(temp_text_path):
-                os.remove(temp_text_path)
-            
-        except Exception as e:
-            print(f"CAPTION ERROR: {e}")
-    
-    # Add music (already downloaded above)
-    if music_url and temp_music_path:
-        print("Adding music to video...")
+                out.append(float(v))
+            except Exception:
+                continue
+        return out
+    return []
+
+
+def parse_switch_times(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return to_float_list(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return []
         try:
-            audio = AudioFileClip(temp_music_path)
-            # NO CUTTING! Use full audio duration
-            video = video.set_audio(audio)
-        except Exception as e:
-            print(f"Error adding music: {e}")
-    
-    # Render
-    print("Rendering video...")
-    output_path = f'output_videos/video_{video_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.mp4'
-    
-    video.write_videofile(
-        output_path,
-        fps=24,
-        codec='libx264',
-        audio_codec='aac',
-        preset='medium',
-        threads=4
-    )
-    
-    # Cleanup
-    print("Cleaning up...")
-    
-    # Close all clips to free memory
-    for clip in clips:
-        clip.close()
-    
-    for idx in range(len(image_urls)):
-        temp_img = f'temp_images/{video_id}_img_{idx}.jpg'
-        if os.path.exists(temp_img):
-            os.remove(temp_img)
-    
-    if temp_music_path and os.path.exists(temp_music_path):
-        os.remove(temp_music_path)
-    
-    video.close()
-    if music_url and audio:
-        audio.close()
-    
-    # Force garbage collection
-    gc.collect()
-    
-    print(f"Video created: {output_path}")
-    return output_path
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return to_float_list(parsed)
+        except Exception:
+            return []
+    return []
+
+
+def compute_durations_from_switch_times(switch_times, audio_duration):
+    times = []
+    for t in to_float_list(switch_times):
+        if 0.0 < t < float(audio_duration):
+            times.append(float(t))
+    times = sorted(set(times))
+    boundaries = [0.0] + times + [float(audio_duration)]
+    durations = []
+    for i in range(len(boundaries) - 1):
+        d = boundaries[i + 1] - boundaries[i]
+        if d < 0:
+            d = 0.0
+        durations.append(d)
+    if durations and durations[-1] < 0.01:
+        durations[-1] = max(0.01, durations[-1])
+    return durations
+
+
+def fetch_track_by_track_id(track_id: str):
+    hdrs = supabase_headers()
+    if hdrs is None:
+        raise Exception("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY env vars.")
+
+    endpoint = f"{SUPABASE_URL}/rest/v1/{FACTORY_MUSIC_TABLE}"
+    params = {
+        "track_id": f"eq.{track_id}",
+        "select": "track_id,url,switch_times,images_needed,fps",
+        "limit": "1",
+    }
+    r = requests.get(endpoint, headers=hdrs, params=params, timeout=20)
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        raise Exception(f"Track not found: track_id='{track_id}'")
+
+    row = rows[0]
+    music_url = (row.get("url") or "").strip()
+    switch_times = parse_switch_times(row.get("switch_times"))
+
+    if not music_url:
+        raise Exception(f"Track '{track_id}' has empty url.")
+    if not switch_times:
+        raise Exception(f"Track '{track_id}' has empty/invalid switch_times.")
+
+    return {
+        "music_url": music_url,
+        "switch_times": switch_times,
+        "images_needed": row.get("images_needed"),
+    }
+
+
+def load_font(size: int):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                return ImageFont.truetype(p, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
 
 def resize_and_crop(img, target_width, target_height):
-    """Resize and crop image to exact dimensions"""
     img_width, img_height = img.size
     target_ratio = target_width / target_height
     img_ratio = img_width / img_height
-    
+
     if img_ratio > target_ratio:
         new_height = target_height
         new_width = int(target_height * img_ratio)
     else:
         new_width = target_width
         new_height = int(target_width / img_ratio)
-    
+
     img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-    
+
     left = (new_width - target_width) // 2
     top = (new_height - target_height) // 2
     right = left + target_width
     bottom = top + target_height
-    
-    img = img.crop((left, top, right, bottom))
-    
-    return img
 
-@app.route('/videos/<filename>', methods=['GET'])
-def serve_video(filename):
-    video_path = os.path.join('output_videos', filename)
-    if os.path.exists(video_path):
-        return send_file(video_path, mimetype='video/mp4')
-    return jsonify({"error": "Video not found"}), 404
+    return img.crop((left, top, right, bottom))
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+def render_caption_overlay(caption: str, duration: float):
+    fontsize = 100 if len(caption) < 30 else 80
+    stroke_width = 2
+
+    text_img = Image.new("RGBA", (1080, 600), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(text_img)
+    font = load_font(fontsize)
+
+    max_width = 800
+    lines = []
+    words = caption.split()
+    current = []
+
+    for w in words:
+        test = " ".join(current + [w])
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            current.append(w)
+        else:
+            if current:
+                lines.append(" ".join(current))
+            current = [w]
+    if current:
+        lines.append(" ".join(current))
+
+    line_height = fontsize + 10
+    total_height = len(lines) * line_height
+    y = (600 - total_height) // 2
+
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        x = (1080 - w) // 2
+
+        for dx in range(-stroke_width, stroke_width + 1):
+            for dy in range(-stroke_width, stroke_width + 1):
+                if dx or dy:
+                    draw.text((x + dx, y + dy), line, font=font, fill="black")
+
+        draw.text((x, y), line, font=font, fill="white")
+        y += line_height
+
+    arr = np.array(text_img)
+    return ImageClip(arr).set_duration(duration).set_position(("center", 1100))
+
+
+def cleanup_loop():
+    while True:
+        now = time.time()
+        to_delete = []
+        with CACHE_LOCK:
+            for token, meta in list(VIDEO_CACHE.items()):
+                if meta["expires_at"] <= now:
+                    to_delete.append((token, meta["path"]))
+                    del VIDEO_CACHE[token]
+        for _, path in to_delete:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+        time.sleep(10)
+
+threading.Thread(target=cleanup_loop, daemon=True).start()
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/download/<token>.mp4", methods=["GET"])
+def download_video(token):
+    with CACHE_LOCK:
+        meta = VIDEO_CACHE.get(token)
+    if not meta:
+        return jsonify({"error": "Not found or expired"}), 404
+
+    path = meta["path"]
+    if not os.path.exists(path):
+        return jsonify({"error": "File missing"}), 404
+
+    # send file; do NOT delete immediately (Buildship may retry). TTL handles cleanup.
+    return send_file(path, mimetype="video/mp4", as_attachment=False)
+
+
+@app.route("/create-video", methods=["POST"])
+def create_video():
+    if not rendering_lock.acquire(blocking=False):
+        return jsonify({"error": "Server busy", "retry_after": 60}), 429
+
+    tmp_dir = None
+    audio = None
+    video = None
+    clips = []
+
+    try:
+        data = request.json or {}
+        image_urls = data.get("image_urls", [])
+        track_id = (data.get("track_id") or "").strip()
+        caption = data.get("caption", "")
+
+        if not image_urls or not track_id:
+            return jsonify({"error": "Missing image_urls or track_id"}), 400
+
+        track = fetch_track_by_track_id(track_id)
+        music_url = track["music_url"]
+        switch_times = track["switch_times"]
+
+        tmp_dir = tempfile.mkdtemp(prefix="vidsrv_")
+        token = uuid.uuid4().hex
+        music_path = os.path.join(tmp_dir, f"{token}.mp3")
+        video_path = os.path.join(tmp_dir, f"{token}.mp4")
+
+        # download music
+        r = requests.get(music_url, timeout=60)
+        r.raise_for_status()
+        with open(music_path, "wb") as f:
+            f.write(r.content)
+
+        audio = AudioFileClip(music_path)
+        audio_duration = float(audio.duration)
+
+        durations = compute_durations_from_switch_times(switch_times, audio_duration)
+        segments = len(durations)
+
+        # ensure N images
+        if len(image_urls) < segments:
+            image_urls = image_urls + [image_urls[-1]] * (segments - len(image_urls))
+        else:
+            image_urls = image_urls[:segments]
+
+        # build clips (no temp jpg files)
+        for img_url, duration in zip(image_urls, durations):
+            resp = requests.get(img_url, timeout=30)
+            resp.raise_for_status()
+            img = Image.open(BytesIO(resp.content))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img = resize_and_crop(img, 1080, 1920)
+            arr = np.array(img)
+            img.close()
+            resp.close()
+            clips.append(ImageClip(arr).set_duration(float(duration)))
+
+        video = concatenate_videoclips(clips, method="compose").set_duration(audio_duration)
+
+        if caption:
+            try:
+                txt_clip = render_caption_overlay(caption, audio_duration)
+                video = CompositeVideoClip([video, txt_clip]).set_duration(audio_duration)
+            except Exception as e:
+                print(f"CAPTION ERROR: {e}")
+
+        audio2 = audio.subclip(0, audio_duration).fx(afx.audio_fadeout, 0.04)
+        video = video.set_audio(audio2)
+
+        video.write_videofile(
+            video_path,
+            fps=24,
+            codec="libx264",
+            audio_codec="aac",
+            preset="veryfast",
+            threads=4,
+            bitrate="5000k",
+            ffmpeg_params=["-pix_fmt", "yuv420p"],
+            verbose=False,
+            logger=None
+        )
+
+        # register in cache
+        with CACHE_LOCK:
+            VIDEO_CACHE[token] = {
+                "path": video_path,
+                "expires_at": time.time() + VIDEO_TTL_SECONDS,
+            }
+
+        base = PUBLIC_BASE_URL.rstrip("/")
+        if not base:
+            # fallback: build from request host
+            base = request.host_url.rstrip("/")
+
+        video_url = f"{base}/download/{token}.mp4"
+        return jsonify({"success": True, "track_id": track_id, "segments": segments, "video_url": video_url})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        rendering_lock.release()
+
+        # close resources
+        try:
+            if video is not None:
+                video.close()
+        except Exception:
+            pass
+        try:
+            if audio is not None:
+                audio.close()
+        except Exception:
+            pass
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+        # DO NOT delete tmp_dir here because it contains the mp4 that Buildship must download.
+        # TTL cleanup thread will remove it later.
+
+        gc.collect()
+
+
+if __name__ == "__main__":
+    print("Video Server (Linux) on :8080")
+    app.run(host="0.0.0.0", port=8080, debug=False)
