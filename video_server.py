@@ -1,8 +1,28 @@
+"""
+Video Server for Instagram Reels/TikTok - LINUX/RENDER VERSION
+Captions with Pillow (NO emoji support)
+
+Audio is source of truth:
+- Video duration matches audio duration exactly
+- Image switching is driven by switch_times (absolute timestamps in seconds)
+- Last image always holds until audio ends
+- Tiny fadeout to remove end pop/click
+
+NEW:
+- Client sends track_id (not music_url, not switch_times)
+- Server fetches track from Supabase table: public.factory_music
+- Optimized for low RAM: preprocess images to temp PNG and ImageClip(file)
+- Download URL is short-lived (TTL); BuildShip downloads and uploads elsewhere
+- Robust retries for Supabase + media downloads (Render sometimes resets sockets)
+"""
+
 from flask import Flask, request, jsonify, send_file
 from moviepy.audio.fx import all as afx
 from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeVideoClip
 from PIL import Image, ImageDraw, ImageFont
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from io import BytesIO
 import os
 import uuid
@@ -16,7 +36,7 @@ app = Flask(__name__)
 rendering_lock = threading.Lock()
 
 # Required: for track lookup only
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
 FACTORY_MUSIC_TABLE = "factory_music"
 
@@ -28,16 +48,29 @@ VIDEO_TTL_SECONDS = int(os.getenv("VIDEO_TTL_SECONDS", "600"))  # 10 min
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "10"))
 
 # Render tuning (no quality loss)
-FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "2"))  # 2 is usually safer on 4GB
-VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "5000k")    # keep your quality
-VIDEO_PRESET = os.getenv("VIDEO_PRESET", "veryfast")   # keep your speed/quality tradeoff
+FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "2"))  # safer on 4GB
+VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "5000k")
+VIDEO_PRESET = os.getenv("VIDEO_PRESET", "veryfast")
 
 # In-memory registry: token -> {path, expires_at}
 VIDEO_CACHE = {}
 CACHE_LOCK = threading.Lock()
 
-# Reuse HTTP connections
+# Requests session with retries (fixes RemoteDisconnected / ECONNRESET style failures)
 HTTP = requests.Session()
+_retry = Retry(
+    total=5,
+    connect=5,
+    read=5,
+    backoff_factor=0.6,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=("GET", "POST", "PUT"),
+    raise_on_status=False,
+)
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=20, pool_maxsize=20)
+HTTP.mount("https://", _adapter)
+HTTP.mount("http://", _adapter)
+HTTP.headers.update({"User-Agent": "video-server/1.0"})
 
 
 def supabase_headers(json_content=False):
@@ -102,6 +135,18 @@ def compute_durations_from_switch_times(switch_times, audio_duration):
     return durations
 
 
+def safe_get(url, *, headers=None, params=None, timeout=(6, 30), stream=False):
+    """
+    Robust GET:
+    - uses session retries
+    - falls back to fresh connection if upstream closes keep-alive socket
+    """
+    try:
+        return HTTP.get(url, headers=headers, params=params, timeout=timeout, stream=stream)
+    except requests.exceptions.RequestException:
+        return requests.get(url, headers=headers, params=params, timeout=timeout, stream=stream)
+
+
 def fetch_track_by_track_id(track_id: str):
     hdrs = supabase_headers()
     if hdrs is None:
@@ -113,7 +158,8 @@ def fetch_track_by_track_id(track_id: str):
         "select": "track_id,url,switch_times,images_needed,fps",
         "limit": "1",
     }
-    r = HTTP.get(endpoint, headers=hdrs, params=params, timeout=20)
+
+    r = safe_get(endpoint, headers=hdrs, params=params, timeout=(6, 20))
     r.raise_for_status()
     rows = r.json()
     if not rows:
@@ -226,7 +272,7 @@ def cleanup_loop():
             try:
                 if os.path.exists(path):
                     os.remove(path)
-                # also try removing the parent tmp dir if empty
+                # try deleting parent tmp dir (might be empty now)
                 parent = os.path.dirname(path)
                 try:
                     os.rmdir(parent)
@@ -289,7 +335,7 @@ def create_video():
         video_path = os.path.join(tmp_dir, f"{token}.mp4")
 
         # download music
-        r = HTTP.get(music_url, timeout=60)
+        r = safe_get(music_url, timeout=(10, 60))
         r.raise_for_status()
         with open(music_path, "wb") as f:
             f.write(r.content)
@@ -306,10 +352,9 @@ def create_video():
         else:
             image_urls = image_urls[:segments]
 
-        # IMPORTANT OPTIMIZATION:
-        # preprocess each image -> save to temp PNG -> ImageClip(file)
+        # OPTIMIZATION: preprocess to lossless PNG on disk to reduce RAM usage
         for idx, (img_url, duration) in enumerate(zip(image_urls, durations), start=1):
-            resp = HTTP.get(img_url, timeout=30)
+            resp = safe_get(img_url, timeout=(10, 60))
             resp.raise_for_status()
 
             img = Image.open(BytesIO(resp.content))
@@ -318,15 +363,18 @@ def create_video():
             img = resize_and_crop(img, 1080, 1920)
 
             img_path = os.path.join(tmp_dir, f"{token}_{idx}.png")
-            img.save(img_path)  # PNG = lossless
+            img.save(img_path)  # lossless
             temp_img_paths.append(img_path)
 
             img.close()
-            resp.close()
+            try:
+                resp.close()
+            except Exception:
+                pass
 
             clips.append(ImageClip(img_path).set_duration(float(duration)))
 
-        # Use chain (less overhead) since all clips are same size
+        # chain is lighter than compose when all clips same size
         video = concatenate_videoclips(clips, method="chain").set_duration(audio_duration)
 
         if caption:
@@ -354,7 +402,7 @@ def create_video():
             logger=None
         )
 
-        # delete temp images + caption + mp3 immediately (keep only mp4 for Buildship)
+        # delete temp images/caption/mp3 immediately (keep only mp4 for Buildship)
         for p in temp_img_paths:
             try:
                 os.remove(p)
@@ -370,12 +418,8 @@ def create_video():
         except Exception:
             pass
 
-        # register mp4 in cache (TTL cleanup removes later)
         with CACHE_LOCK:
-            VIDEO_CACHE[token] = {
-                "path": video_path,
-                "expires_at": time.time() + VIDEO_TTL_SECONDS,
-            }
+            VIDEO_CACHE[token] = {"path": video_path, "expires_at": time.time() + VIDEO_TTL_SECONDS}
 
         base = PUBLIC_BASE_URL.rstrip("/")
         if not base:
@@ -392,7 +436,6 @@ def create_video():
     finally:
         rendering_lock.release()
 
-        # close resources
         try:
             if video is not None:
                 video.close()
@@ -414,5 +457,5 @@ def create_video():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
-    print(f"Video Server (Linux) on :{port}")
+    print(f"Video Server (Render) on :{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
