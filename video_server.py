@@ -6,12 +6,10 @@ import requests
 from io import BytesIO
 import os
 import uuid
-from datetime import datetime, timedelta
 import threading
 import gc
 import json
 import tempfile
-import numpy as np
 import time
 
 app = Flask(__name__)
@@ -22,15 +20,24 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip()
 FACTORY_MUSIC_TABLE = "factory_music"
 
-# Public base url of this server (Coolify domain or http://<ip>:8080)
+# Optional: if empty, we’ll use request.host_url
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 
 # How long to keep mp4 around for Buildship to fetch
 VIDEO_TTL_SECONDS = int(os.getenv("VIDEO_TTL_SECONDS", "600"))  # 10 min
+CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "10"))
+
+# Render tuning (no quality loss)
+FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "2"))  # 2 is usually safer on 4GB
+VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "5000k")    # keep your quality
+VIDEO_PRESET = os.getenv("VIDEO_PRESET", "veryfast")   # keep your speed/quality tradeoff
 
 # In-memory registry: token -> {path, expires_at}
 VIDEO_CACHE = {}
 CACHE_LOCK = threading.Lock()
+
+# Reuse HTTP connections
+HTTP = requests.Session()
 
 
 def supabase_headers(json_content=False):
@@ -106,7 +113,7 @@ def fetch_track_by_track_id(track_id: str):
         "select": "track_id,url,switch_times,images_needed,fps",
         "limit": "1",
     }
-    r = requests.get(endpoint, headers=hdrs, params=params, timeout=20)
+    r = HTTP.get(endpoint, headers=hdrs, params=params, timeout=20)
     r.raise_for_status()
     rows = r.json()
     if not rows:
@@ -121,11 +128,7 @@ def fetch_track_by_track_id(track_id: str):
     if not switch_times:
         raise Exception(f"Track '{track_id}' has empty/invalid switch_times.")
 
-    return {
-        "music_url": music_url,
-        "switch_times": switch_times,
-        "images_needed": row.get("images_needed"),
-    }
+    return {"music_url": music_url, "switch_times": switch_times}
 
 
 def load_font(size: int):
@@ -165,7 +168,7 @@ def resize_and_crop(img, target_width, target_height):
     return img.crop((left, top, right, bottom))
 
 
-def render_caption_overlay(caption: str, duration: float):
+def write_caption_png(caption: str, out_path: str):
     fontsize = 100 if len(caption) < 30 else 80
     stroke_width = 2
 
@@ -207,8 +210,7 @@ def render_caption_overlay(caption: str, duration: float):
         draw.text((x, y), line, font=font, fill="white")
         y += line_height
 
-    arr = np.array(text_img)
-    return ImageClip(arr).set_duration(duration).set_position(("center", 1100))
+    text_img.save(out_path)
 
 
 def cleanup_loop():
@@ -224,9 +226,15 @@ def cleanup_loop():
             try:
                 if os.path.exists(path):
                     os.remove(path)
+                # also try removing the parent tmp dir if empty
+                parent = os.path.dirname(path)
+                try:
+                    os.rmdir(parent)
+                except Exception:
+                    pass
             except Exception:
                 pass
-        time.sleep(10)
+        time.sleep(CLEANUP_INTERVAL_SECONDS)
 
 threading.Thread(target=cleanup_loop, daemon=True).start()
 
@@ -247,7 +255,6 @@ def download_video(token):
     if not os.path.exists(path):
         return jsonify({"error": "File missing"}), 404
 
-    # send file; do NOT delete immediately (Buildship may retry). TTL handles cleanup.
     return send_file(path, mimetype="video/mp4", as_attachment=False)
 
 
@@ -260,6 +267,8 @@ def create_video():
     audio = None
     video = None
     clips = []
+    temp_img_paths = []
+    caption_png = None
 
     try:
         data = request.json or {}
@@ -280,7 +289,7 @@ def create_video():
         video_path = os.path.join(tmp_dir, f"{token}.mp4")
 
         # download music
-        r = requests.get(music_url, timeout=60)
+        r = HTTP.get(music_url, timeout=60)
         r.raise_for_status()
         with open(music_path, "wb") as f:
             f.write(r.content)
@@ -297,24 +306,34 @@ def create_video():
         else:
             image_urls = image_urls[:segments]
 
-        # build clips (no temp jpg files)
-        for img_url, duration in zip(image_urls, durations):
-            resp = requests.get(img_url, timeout=30)
+        # IMPORTANT OPTIMIZATION:
+        # preprocess each image -> save to temp PNG -> ImageClip(file)
+        for idx, (img_url, duration) in enumerate(zip(image_urls, durations), start=1):
+            resp = HTTP.get(img_url, timeout=30)
             resp.raise_for_status()
+
             img = Image.open(BytesIO(resp.content))
             if img.mode != "RGB":
                 img = img.convert("RGB")
             img = resize_and_crop(img, 1080, 1920)
-            arr = np.array(img)
+
+            img_path = os.path.join(tmp_dir, f"{token}_{idx}.png")
+            img.save(img_path)  # PNG = lossless
+            temp_img_paths.append(img_path)
+
             img.close()
             resp.close()
-            clips.append(ImageClip(arr).set_duration(float(duration)))
 
-        video = concatenate_videoclips(clips, method="compose").set_duration(audio_duration)
+            clips.append(ImageClip(img_path).set_duration(float(duration)))
+
+        # Use chain (less overhead) since all clips are same size
+        video = concatenate_videoclips(clips, method="chain").set_duration(audio_duration)
 
         if caption:
             try:
-                txt_clip = render_caption_overlay(caption, audio_duration)
+                caption_png = os.path.join(tmp_dir, f"{token}_caption.png")
+                write_caption_png(caption, caption_png)
+                txt_clip = ImageClip(caption_png, transparent=True).set_duration(audio_duration).set_position(("center", 1100))
                 video = CompositeVideoClip([video, txt_clip]).set_duration(audio_duration)
             except Exception as e:
                 print(f"CAPTION ERROR: {e}")
@@ -327,15 +346,31 @@ def create_video():
             fps=24,
             codec="libx264",
             audio_codec="aac",
-            preset="veryfast",
-            threads=4,
-            bitrate="5000k",
-            ffmpeg_params=["-pix_fmt", "yuv420p"],
+            preset=VIDEO_PRESET,
+            threads=FFMPEG_THREADS,
+            bitrate=VIDEO_BITRATE,
+            ffmpeg_params=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
             verbose=False,
             logger=None
         )
 
-        # register in cache
+        # delete temp images + caption + mp3 immediately (keep only mp4 for Buildship)
+        for p in temp_img_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        if caption_png:
+            try:
+                os.remove(caption_png)
+            except Exception:
+                pass
+        try:
+            os.remove(music_path)
+        except Exception:
+            pass
+
+        # register mp4 in cache (TTL cleanup removes later)
         with CACHE_LOCK:
             VIDEO_CACHE[token] = {
                 "path": video_path,
@@ -344,7 +379,6 @@ def create_video():
 
         base = PUBLIC_BASE_URL.rstrip("/")
         if not base:
-            # fallback: build from request host
             base = request.host_url.rstrip("/")
 
         video_url = f"{base}/download/{token}.mp4"
@@ -375,12 +409,10 @@ def create_video():
             except Exception:
                 pass
 
-        # DO NOT delete tmp_dir here because it contains the mp4 that Buildship must download.
-        # TTL cleanup thread will remove it later.
-
         gc.collect()
 
 
 if __name__ == "__main__":
-    print("Video Server (Linux) on :8080")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    port = int(os.getenv("PORT", "8080"))
+    print(f"Video Server (Linux) on :{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
