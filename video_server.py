@@ -82,9 +82,11 @@ NOTO_EMOJI_BASE_URL = os.getenv(
 EMOJI_CACHE = {}
 EMOJI_CACHE_LOCK = threading.Lock()
 
-# Caption typography. Liberation Sans Regular is metrically compatible with
-# Arial/Helvetica and is a close Linux-safe match for CapCut's classic/system
-# caption look. Both settings can be overridden on Render without code edits.
+# Caption typography. If CapCutSansText-Regular.otf is deployed beside this
+# script, use CapCut's actual system-text face. The path and styling can still
+# be overridden on Render without code edits.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CAPCUT_FONT_PATH = os.path.join(SCRIPT_DIR, "CapCutSansText-Regular.otf")
 CAPTION_FONT_PATH = os.getenv("CAPTION_FONT_PATH", "").strip()
 CAPTION_FONT_SIZE = int(os.getenv("CAPTION_FONT_SIZE", "80"))
 CAPTION_STROKE_WIDTH = int(os.getenv("CAPTION_STROKE_WIDTH", "3"))
@@ -197,6 +199,7 @@ def fetch_track_by_track_id(track_id: str):
 def load_font(size: int):
     candidates = [
         CAPTION_FONT_PATH,
+        CAPCUT_FONT_PATH,
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/nimbus-sans/NimbusSans-Regular.otf",
