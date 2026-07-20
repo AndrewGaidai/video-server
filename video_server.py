@@ -82,14 +82,14 @@ NOTO_EMOJI_BASE_URL = os.getenv(
 EMOJI_CACHE = {}
 EMOJI_CACHE_LOCK = threading.Lock()
 
-# Caption typography: use Montserrat Medium at a consistent size.
+# Caption typography: use Montserrat SemiBold at a consistent size.
 # Keep every caption at the same size and stroke regardless of its length.
 CAPTION_FONT_PATH = os.getenv("CAPTION_FONT_PATH", "").strip()
-MONTSERRAT_MEDIUM_URL = os.getenv(
-    "MONTSERRAT_MEDIUM_URL",
-    "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Medium.ttf",
+MONTSERRAT_SEMIBOLD_URL = os.getenv(
+    "MONTSERRAT_SEMIBOLD_URL",
+    "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-SemiBold.ttf",
 ).strip()
-MONTSERRAT_MEDIUM_CACHE_PATH = os.path.join(tempfile.gettempdir(), "Montserrat-Medium.ttf")
+MONTSERRAT_SEMIBOLD_CACHE_PATH = os.path.join(tempfile.gettempdir(), "Montserrat-SemiBold.ttf")
 FONT_CACHE_LOCK = threading.Lock()
 CAPTION_FONT_SIZE = 70
 CAPTION_STROKE_WIDTH = 2
@@ -202,9 +202,9 @@ def fetch_track_by_track_id(track_id: str):
 def load_font(size: int):
     candidates = [
         CAPTION_FONT_PATH,
-        "/usr/share/fonts/truetype/montserrat/Montserrat-Medium.ttf",
-        "/usr/share/fonts/opentype/montserrat/Montserrat-Medium.otf",
-        MONTSERRAT_MEDIUM_CACHE_PATH,
+        "/usr/share/fonts/truetype/montserrat/Montserrat-SemiBold.ttf",
+        "/usr/share/fonts/opentype/montserrat/Montserrat-SemiBold.otf",
+        MONTSERRAT_SEMIBOLD_CACHE_PATH,
     ]
     for p in candidates:
         try:
@@ -213,19 +213,19 @@ def load_font(size: int):
         except Exception:
             pass
 
-    # Render images do not consistently include Montserrat Medium. Download the
+    # Render images do not consistently include Montserrat SemiBold. Download the
     # official font once and cache it in /tmp so this remains a single-file app.
-    if MONTSERRAT_MEDIUM_URL:
+    if MONTSERRAT_SEMIBOLD_URL:
         with FONT_CACHE_LOCK:
             try:
-                if not os.path.exists(MONTSERRAT_MEDIUM_CACHE_PATH):
-                    response = HTTP.get(MONTSERRAT_MEDIUM_URL, timeout=(10, 30))
+                if not os.path.exists(MONTSERRAT_SEMIBOLD_CACHE_PATH):
+                    response = HTTP.get(MONTSERRAT_SEMIBOLD_URL, timeout=(10, 30))
                     response.raise_for_status()
-                    with open(MONTSERRAT_MEDIUM_CACHE_PATH, "wb") as font_file:
+                    with open(MONTSERRAT_SEMIBOLD_CACHE_PATH, "wb") as font_file:
                         font_file.write(response.content)
-                return ImageFont.truetype(MONTSERRAT_MEDIUM_CACHE_PATH, size)
+                return ImageFont.truetype(MONTSERRAT_SEMIBOLD_CACHE_PATH, size)
             except Exception as exc:
-                print(f"Could not load Montserrat Medium: {exc}")
+                print(f"Could not load Montserrat SemiBold: {exc}")
 
     # Non-bold fallback, so a missing Montserrat file never silently becomes bold.
     for p in (
