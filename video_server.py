@@ -82,9 +82,15 @@ NOTO_EMOJI_BASE_URL = os.getenv(
 EMOJI_CACHE = {}
 EMOJI_CACHE_LOCK = threading.Lock()
 
-# Caption typography: restore the Montserrat Bold look from the earlier server.
+# Caption typography: use Montserrat Medium at a consistent size.
 # Keep every caption at the same size and stroke regardless of its length.
 CAPTION_FONT_PATH = os.getenv("CAPTION_FONT_PATH", "").strip()
+MONTSERRAT_MEDIUM_URL = os.getenv(
+    "MONTSERRAT_MEDIUM_URL",
+    "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Medium.ttf",
+).strip()
+MONTSERRAT_MEDIUM_CACHE_PATH = os.path.join(tempfile.gettempdir(), "Montserrat-Medium.ttf")
+FONT_CACHE_LOCK = threading.Lock()
 CAPTION_FONT_SIZE = 70
 CAPTION_STROKE_WIDTH = 2
 
@@ -198,11 +204,36 @@ def load_font(size: int):
         CAPTION_FONT_PATH,
         "/usr/share/fonts/truetype/montserrat/Montserrat-Medium.ttf",
         "/usr/share/fonts/opentype/montserrat/Montserrat-Medium.otf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        MONTSERRAT_MEDIUM_CACHE_PATH,
     ]
     for p in candidates:
         try:
             if p and os.path.exists(p):
+                return ImageFont.truetype(p, size)
+        except Exception:
+            pass
+
+    # Render images do not consistently include Montserrat Medium. Download the
+    # official font once and cache it in /tmp so this remains a single-file app.
+    if MONTSERRAT_MEDIUM_URL:
+        with FONT_CACHE_LOCK:
+            try:
+                if not os.path.exists(MONTSERRAT_MEDIUM_CACHE_PATH):
+                    response = HTTP.get(MONTSERRAT_MEDIUM_URL, timeout=(10, 30))
+                    response.raise_for_status()
+                    with open(MONTSERRAT_MEDIUM_CACHE_PATH, "wb") as font_file:
+                        font_file.write(response.content)
+                return ImageFont.truetype(MONTSERRAT_MEDIUM_CACHE_PATH, size)
+            except Exception as exc:
+                print(f"Could not load Montserrat Medium: {exc}")
+
+    # Non-bold fallback, so a missing Montserrat file never silently becomes bold.
+    for p in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ):
+        try:
+            if os.path.exists(p):
                 return ImageFont.truetype(p, size)
         except Exception:
             pass
