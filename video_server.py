@@ -82,16 +82,11 @@ NOTO_EMOJI_BASE_URL = os.getenv(
 EMOJI_CACHE = {}
 EMOJI_CACHE_LOCK = threading.Lock()
 
-# Caption typography. Arimo is Google's open-source, metrically compatible
-# Arial replacement, so it can safely be committed and deployed with this app.
-# Default to its maximum/bold weight to avoid the thin regular appearance.
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ARIMO_FONT_PATH = os.path.join(SCRIPT_DIR, "Arimo-Variable.ttf")
-CAPCUT_FONT_PATH = os.path.join(SCRIPT_DIR, "CapCutSansText-Medium.otf")
+# Caption typography: restore the Montserrat Bold look from the earlier server.
+# Keep every caption at the same size and stroke regardless of its length.
 CAPTION_FONT_PATH = os.getenv("CAPTION_FONT_PATH", "").strip()
-CAPTION_FONT_SIZE = int(os.getenv("CAPTION_FONT_SIZE", "80"))
-CAPTION_FONT_WEIGHT = int(os.getenv("CAPTION_FONT_WEIGHT", "700"))
-CAPTION_STROKE_WIDTH = int(os.getenv("CAPTION_STROKE_WIDTH", "3"))
+CAPTION_FONT_SIZE = 70
+CAPTION_STROKE_WIDTH = 2
 
 
 def supabase_headers(json_content=False):
@@ -201,23 +196,14 @@ def fetch_track_by_track_id(track_id: str):
 def load_font(size: int):
     candidates = [
         CAPTION_FONT_PATH,
-        ARIMO_FONT_PATH,
-        CAPCUT_FONT_PATH,
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/nimbus-sans/NimbusSans-Regular.otf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf",
+        "/usr/share/fonts/opentype/montserrat/Montserrat-Bold.otf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for p in candidates:
         try:
             if p and os.path.exists(p):
-                font = ImageFont.truetype(p, size)
-                if os.path.basename(p) == "Arimo-Variable.ttf":
-                    # Arimo exposes one Weight axis ranging from 400 to 700.
-                    font.set_variation_by_axes([
-                        max(400, min(700, CAPTION_FONT_WEIGHT))
-                    ])
-                return font
+                return ImageFont.truetype(p, size)
         except Exception:
             pass
     return ImageFont.load_default()
