@@ -82,6 +82,13 @@ NOTO_EMOJI_BASE_URL = os.getenv(
 EMOJI_CACHE = {}
 EMOJI_CACHE_LOCK = threading.Lock()
 
+# Caption typography. Liberation Sans Regular is metrically compatible with
+# Arial/Helvetica and is a close Linux-safe match for CapCut's classic/system
+# caption look. Both settings can be overridden on Render without code edits.
+CAPTION_FONT_PATH = os.getenv("CAPTION_FONT_PATH", "").strip()
+CAPTION_FONT_SIZE = int(os.getenv("CAPTION_FONT_SIZE", "80"))
+CAPTION_STROKE_WIDTH = int(os.getenv("CAPTION_STROKE_WIDTH", "3"))
+
 
 def supabase_headers(json_content=False):
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
@@ -189,13 +196,15 @@ def fetch_track_by_track_id(track_id: str):
 
 def load_font(size: int):
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        CAPTION_FONT_PATH,
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/nimbus-sans/NimbusSans-Regular.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]
     for p in candidates:
         try:
-            if os.path.exists(p):
+            if p and os.path.exists(p):
                 return ImageFont.truetype(p, size)
         except Exception:
             pass
@@ -407,13 +416,13 @@ def draw_mixed_line(text_img, draw, line: str, y: int, font, fontsize: int, line
                 # Graceful fallback if an asset is unavailable.
                 draw.text(
                     (x, y), value, font=font, fill="white",
-                    stroke_width=2, stroke_fill="black",
+                    stroke_width=CAPTION_STROKE_WIDTH, stroke_fill="black",
                 )
             x += emoji_size
         else:
             draw.text(
                 (x, y), value, font=font, fill="white",
-                stroke_width=2, stroke_fill="black",
+                stroke_width=CAPTION_STROKE_WIDTH, stroke_fill="black",
             )
             x += draw.textlength(value, font=font)
 
@@ -442,7 +451,7 @@ def resize_and_crop(img, target_width, target_height):
 
 def write_caption_png(caption: str, out_path: str):
     # Keep every caption at the size previously used for ~36-character text.
-    fontsize = 80
+    fontsize = CAPTION_FONT_SIZE
 
     text_img = Image.new("RGBA", (1080, 600), (0, 0, 0, 0))
     draw = ImageDraw.Draw(text_img)
