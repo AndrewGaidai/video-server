@@ -196,8 +196,8 @@ def fetch_track_by_track_id(track_id: str):
 def load_font(size: int):
     candidates = [
         CAPTION_FONT_PATH,
-        "/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf",
-        "/usr/share/fonts/opentype/montserrat/Montserrat-Bold.otf",
+        "/usr/share/fonts/truetype/montserrat/Montserrat-Medium.ttf",
+        "/usr/share/fonts/opentype/montserrat/Montserrat-Medium.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for p in candidates:
